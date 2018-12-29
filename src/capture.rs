@@ -13,7 +13,10 @@ use types::c_void;
 /// `Backtrace` supports pretty-printing of backtraces through its `Debug`
 /// implementation.
 #[derive(Clone)]
-#[cfg_attr(feature = "serialize-rustc", derive(RustcDecodable, RustcEncodable))]
+#[cfg_attr(
+    feature = "serialize-rustc",
+    derive(RustcDecodable, RustcEncodable)
+)]
 #[cfg_attr(feature = "serialize-serde", derive(Deserialize, Serialize))]
 pub struct Backtrace {
     // Frames here are listed from top-to-bottom of the stack
@@ -28,7 +31,10 @@ pub struct Backtrace {
 /// This type is returned as a list from `Backtrace::frames` and represents one
 /// stack frame in a captured backtrace.
 #[derive(Clone)]
-#[cfg_attr(feature = "serialize-rustc", derive(RustcDecodable, RustcEncodable))]
+#[cfg_attr(
+    feature = "serialize-rustc",
+    derive(RustcDecodable, RustcEncodable)
+)]
 #[cfg_attr(feature = "serialize-serde", derive(Deserialize, Serialize))]
 pub struct BacktraceFrame {
     ip: usize,
@@ -41,13 +47,45 @@ pub struct BacktraceFrame {
 /// This type is returned as a list from `BacktraceFrame::symbols` and
 /// represents the metadata for a symbol in a backtrace.
 #[derive(Clone)]
-#[cfg_attr(feature = "serialize-rustc", derive(RustcDecodable, RustcEncodable))]
+#[cfg_attr(
+    feature = "serialize-rustc",
+    derive(RustcDecodable, RustcEncodable)
+)]
 #[cfg_attr(feature = "serialize-serde", derive(Deserialize, Serialize))]
 pub struct BacktraceSymbol {
     name: Option<Vec<u8>>,
     addr: Option<usize>,
     filename: Option<PathBuf>,
     lineno: Option<u32>,
+}
+
+use std::io::Write;
+
+struct EmergencyBuf {
+    pub inner: Vec<u8>,
+}
+
+impl Default for EmergencyBuf {
+    fn default() -> Self {
+        Self { inner: vec![] }
+    }
+}
+
+impl ::std::io::Write for EmergencyBuf {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> ::std::io::Result<usize> {
+        if self.inner.capacity() - self.inner.len() >= buf.len() {
+            self.inner.extend_from_slice(buf);
+            Ok(buf.len())
+        } else {
+            Ok(0)
+        }
+    }
+
+    #[inline]
+    fn flush(&mut self) -> ::std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Backtrace {
@@ -124,6 +162,72 @@ impl Backtrace {
             frames,
             actual_start_index: actual_start_index.unwrap_or(0),
         }
+    }
+
+    /// Dumps emergency without heap allocation. It's useful when OOM.
+    pub fn dumps_emergency<B: Write>(buf: &mut B) -> ::std::io::Result<()> {
+        let mut result = write!(buf, "stack backtrace:");
+        let mut frame_idx = 0;
+
+        trace(|frame| {
+            if result.is_err() {
+                // stop tracing.
+                return false;
+            }
+            let ip = frame.ip();
+            result = write!(buf, "\n{:4}: ", frame_idx);
+            let mut symbol_idx = 0;
+
+            resolve(ip as *mut _, |symbol| {
+                if result.is_err() {
+                    // stop resolving
+                    return;
+                }
+
+                if symbol_idx != 0 {
+                    result = write!(buf, "\n      ");
+                    if result.is_err() {
+                        return;
+                    }
+                }
+
+                if let Some(name) = symbol.name() {
+                    result = write!(buf, "{}", name);
+                } else {
+                    result = write!(buf, "<unknown>");
+                }
+                if result.is_err() {
+                    return;
+                }
+
+                if symbol_idx == 0 {
+                    result = write!(buf, " ({:?})", frame.ip());
+                    if result.is_err() {
+                        return;
+                    }
+                }
+
+                if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
+                    result = write!(buf, "\n             at {}:{}", file.display(), line);
+                    if result.is_err() {
+                        return;
+                    }
+                }
+
+                symbol_idx += 1;
+            });
+
+            if symbol_idx == 0 {
+                result = write!(buf, "<no info> ({:?})", ip);
+                if result.is_err() {
+                    return false;
+                }
+            }
+            frame_idx += 1;
+            true
+        });
+
+        result
     }
 
     /// Returns the frames from when this backtrace was captured.
