@@ -4,6 +4,7 @@ use std::os::raw::c_void;
 use std::path::{Path, PathBuf};
 
 use {trace, resolve, Frame, Symbol, SymbolName};
+use std::io::Write;
 
 // Ok so the `//~ HACK` directives here are, well, hacks. Right now we want to
 // compile on stable for serde support, but we also want to use
@@ -104,6 +105,72 @@ impl Backtrace {
     /// function started.
     pub fn frames(&self) -> &[BacktraceFrame] {
         &self.frames
+    }
+
+    /// Dumps emergency without heap allocation. It's useful when OOM.
+    pub fn dumps_emergency<B: Write>(buf: &mut B) -> ::std::io::Result<()> {
+        let mut result = write!(buf, "stack backtrace:");
+        let mut frame_idx = 0;
+
+        trace(|frame| {
+            if result.is_err() {
+                // stop tracing.
+                return false;
+            }
+            let ip = frame.ip();
+            result = write!(buf, "\n{:4}: ", frame_idx);
+            let mut symbol_idx = 0;
+
+            resolve(ip as *mut _, |symbol| {
+                if result.is_err() {
+                    // stop resolving
+                    return;
+                }
+
+                if symbol_idx != 0 {
+                    result = write!(buf, "\n      ");
+                    if result.is_err() {
+                        return;
+                    }
+                }
+
+                if let Some(name) = symbol.name() {
+                    result = write!(buf, "{}", name);
+                } else {
+                    result = write!(buf, "<unknown>");
+                }
+                if result.is_err() {
+                    return;
+                }
+
+                if symbol_idx == 0 {
+                    result = write!(buf, " ({:?})", frame.ip());
+                    if result.is_err() {
+                        return;
+                    }
+                }
+
+                if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
+                    result = write!(buf, "\n             at {}:{}", file.display(), line);
+                    if result.is_err() {
+                        return;
+                    }
+                }
+
+                symbol_idx += 1;
+            });
+
+            if symbol_idx == 0 {
+                result = write!(buf, "<no info> ({:?})", ip);
+                if result.is_err() {
+                    return false;
+                }
+            }
+            frame_idx += 1;
+            true
+        });
+
+        result
     }
 }
 
